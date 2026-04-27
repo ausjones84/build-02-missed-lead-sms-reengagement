@@ -1,0 +1,341 @@
+{
+  "name": "Build #2 - Inbound SMS Reply Handler + AI Conversation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ghl-inbound-sms",
+        "responseMode": "responseNode"
+      },
+      "id": "webhook-inbound",
+      "name": "GHL Inbound SMS Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\nconst contactId = body.contact_id || body.contactId || '';\nconst contactName = body.contact?.firstName || '';\nconst contactPhone = body.contact?.phone || body.from || '';\nconst messageBody = body.body || body.message || '';\nconst conversationId = body.conversationId || contactId;\nreturn {\n  contact_id: contactId,\n  contact_name: contactName || 'there',\n  contact_phone: contactPhone,\n  message_body: messageBody,\n  conversation_id: conversationId,\n  received_at: new Date().toISOString()\n};"
+      },
+      "id": "parse-reply",
+      "name": "Parse Inbound Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://services.leadconnectorhq.com/contacts/{{$json.contact_id}}",
+        "method": "GET",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ={{$env.GHL_API_KEY}}"
+            },
+            {
+              "name": "Version",
+              "value": "2021-07-28"
+            }
+          ]
+        }
+      },
+      "id": "get-contact",
+      "name": "Get GHL Contact History",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        750,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "={{$env.OPENAI_SYSTEM_PROMPT}}"
+            },
+            {
+              "role": "user",
+              "content": "=Contact: {{$('Parse Inbound Reply').item.json.contact_name}}\nPhone: {{$('Parse Inbound Reply').item.json.contact_phone}}\nPrevious tags: {{JSON.stringify($json.tags)}}\nTheir message: {{$('Parse Inbound Reply').item.json.message_body}}\n\nReply naturally, qualify their need, and guide toward booking a free consultation or escalate if urgent."
+            }
+          ]
+        },
+        "options": {
+          "maxTokens": 300,
+          "temperature": 0.7
+        }
+      },
+      "id": "openai-response",
+      "name": "OpenAI: Generate Reply",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const reply = $input.first().json.message?.content || $input.first().json.choices?.[0]?.message?.content || '';\nconst lowerReply = $('Parse Inbound Reply').item.json.message_body.toLowerCase();\nlet intent = 'continue';\nconst urgentWords = ['urgent','emergency','serious','surgery','hospital','died','critical','now','asap','right now'];\nconst bookWords = ['yes','sure','okay','sounds good','book','schedule','tomorrow','today','available','works for me'];\nconst notInterestedWords = ['no thanks','not interested','stop','unsubscribe','go away'];\nif (urgentWords.some(w => lowerReply.includes(w))) intent = 'escalate';\nelse if (bookWords.some(w => lowerReply.includes(w))) intent = 'book';\nelse if (notInterestedWords.some(w => lowerReply.includes(w))) intent = 'stop';\nreturn {\n  ai_reply: reply,\n  intent: intent,\n  is_hot: intent === 'escalate',\n  contact_id: $('Parse Inbound Reply').item.json.contact_id,\n  contact_name: $('Parse Inbound Reply').item.json.contact_name,\n  contact_phone: $('Parse Inbound Reply').item.json.contact_phone,\n  original_message: $('Parse Inbound Reply').item.json.message_body\n};"
+      },
+      "id": "classify-intent",
+      "name": "Classify Intent + Build Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://services.leadconnectorhq.com/conversations/messages",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ={{$env.GHL_API_KEY}}"
+            },
+            {
+              "name": "Version",
+              "value": "2021-07-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "type": "SMS",
+          "contactId": "={{$json.contact_id}}",
+          "message": "={{$json.ai_reply}}"
+        }
+      },
+      "id": "send-ai-reply",
+      "name": "Send AI Reply via GHL SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1500,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.intent}}",
+              "operation": "equals",
+              "value2": "escalate"
+            }
+          ]
+        }
+      },
+      "id": "check-hot",
+      "name": "Is Hot Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.SLACK_WEBHOOK_URL}}",
+        "method": "POST",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "text": "=:fire: *HOT REPLY* from {{$json.contact_name}} ({{$json.contact_phone}})\n\nMessage: _\"{{$json.original_message}}\"_\n\nThis lead needs immediate attorney follow-up. Reply or call NOW."
+        }
+      },
+      "id": "slack-alert",
+      "name": "Slack Escalation Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1750,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://services.leadconnectorhq.com/contacts/={{$json.contact_id}}",
+        "method": "PUT",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ={{$env.GHL_API_KEY}}"
+            },
+            {
+              "name": "Version",
+              "value": "2021-07-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "tags": [
+            "hot-reply",
+            "needs-attorney-call"
+          ],
+          "customFields": [
+            {
+              "key": "lead_status",
+              "field_value": "hot"
+            },
+            {
+              "key": "missed_call_recovery_status",
+              "field_value": "hot_reply_received"
+            }
+          ]
+        }
+      },
+      "id": "update-hot-contact",
+      "name": "Update GHL — Mark Hot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1750,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"success\"}"
+      },
+      "id": "respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "GHL Inbound SMS Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Inbound Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Inbound Reply": {
+      "main": [
+        [
+          {
+            "node": "Get GHL Contact History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get GHL Contact History": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Generate Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: Generate Reply": {
+      "main": [
+        [
+          {
+            "node": "Classify Intent + Build Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Intent + Build Reply": {
+      "main": [
+        [
+          {
+            "node": "Send AI Reply via GHL SMS",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Hot Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Hot Lead?": {
+      "main": [
+        [
+          {
+            "node": "Slack Escalation Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update GHL — Mark Hot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Escalation Alert": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    "build-02",
+    "ghl",
+    "openai",
+    "sms-reply",
+    "escalation"
+  ]
+}
