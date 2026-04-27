@@ -1,0 +1,261 @@
+{
+  "name": "Build #2 - Missed Call Trigger + 60-Second SMS",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ghl-missed-call",
+        "responseMode": "responseNode"
+      },
+      "id": "webhook-missed-call",
+      "name": "GHL Missed Call Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\nconst contactId = body.contact_id || body.contactId || '';\nconst contactName = body.contact?.firstName || body.firstName || '';\nconst contactPhone = body.contact?.phone || body.phone || '';\nconst triggerType = body.type || 'missed_call';\nconst missedAt = body.dateAdded || new Date().toISOString();\n\nreturn {\n  contact_id: contactId,\n  contact_name: contactName || 'there',\n  contact_phone: contactPhone,\n  trigger_type: triggerType,\n  missed_at: missedAt,\n  location_id: body.locationId || process.env.GHL_LOCATION_ID,\n  should_send_sms: contactPhone ? true : false\n};"
+      },
+      "id": "parse-webhook",
+      "name": "Parse Webhook Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.should_send_sms}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "has-phone",
+      "name": "Has Phone Number?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        750,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://services.leadconnectorhq.com/conversations/messages",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ={{$env.GHL_API_KEY}}"
+            },
+            {
+              "name": "Version",
+              "value": "2021-07-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "type": "SMS",
+          "contactId": "={{$json.contact_id}}",
+          "message": "=Hi {{$json.contact_name}}, this is [FIRM NAME]. We just missed your call and don't want to leave you hanging. Can I help you today? Just reply here and we'll get back to you right away."
+        }
+      },
+      "id": "send-initial-sms",
+      "name": "Send 60-Second Recovery SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1000,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://services.leadconnectorhq.com/contacts/={{$json.contact_id}}",
+        "method": "PUT",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ={{$env.GHL_API_KEY}}"
+            },
+            {
+              "name": "Version",
+              "value": "2021-07-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "tags": [
+            "missed-call",
+            "sms-recovery-sent"
+          ],
+          "customFields": [
+            {
+              "key": "missed_call_recovery_status",
+              "field_value": "sms_sent"
+            },
+            {
+              "key": "missed_call_at",
+              "field_value": "={{$json.missed_at}}"
+            }
+          ]
+        }
+      },
+      "id": "update-ghl-contact",
+      "name": "Tag Contact in GHL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1000,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://services.leadconnectorhq.com/opportunities/",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ={{$env.GHL_API_KEY}}"
+            },
+            {
+              "name": "Version",
+              "value": "2021-07-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "pipelineId": "={{$env.GHL_PIPELINE_ID}}",
+          "pipelineStageId": "={{$env.GHL_MISSED_CALL_STAGE_ID}}",
+          "contactId": "={{$json.contact_id}}",
+          "name": "=Missed Call Recovery - {{$json.contact_name}}",
+          "status": "open"
+        }
+      },
+      "id": "create-opportunity",
+      "name": "Create Missed Call Opportunity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1250,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"success\",\"message\":\"Missed call recovery SMS sent\"}"
+      },
+      "id": "respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "GHL Missed Call Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Webhook Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Webhook Payload": {
+      "main": [
+        [
+          {
+            "node": "Has Phone Number?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Phone Number?": {
+      "main": [
+        [
+          {
+            "node": "Send 60-Second Recovery SMS",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Tag Contact in GHL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send 60-Second Recovery SMS": {
+      "main": [
+        [
+          {
+            "node": "Create Missed Call Opportunity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Missed Call Opportunity": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    "build-02",
+    "ghl",
+    "missed-call",
+    "sms",
+    "reengagement"
+  ]
+}
